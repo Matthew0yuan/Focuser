@@ -18,20 +18,18 @@ from brainflow.data_filter import (
 # Basic settings
 # =========================
 BOARD_ID = BoardIds.CYTON_DAISY_BOARD.value   # 16ch: CYTON_DAISY_BOARD; 8ch: CYTON_BOARD
-SERIAL_PORT = 'COM3' if sys.platform.startswith('win') else '/dev/ttyUSB0'
-
+SERIAL_PORT = 'COM3'
 # Training settings
 BASELINE_SEC   = 60#baseline duration(sec)
 TRAIN_SEC      = 20 * 60 #training duration
 WINDOW_SEC     = 3  #PSD window length
 STEP_SEC       = 1 #update step
-
-# Frequency bands
+#frequency bands
 THETA_BAND     = (4.0, 8.0)
 BETA_BAND      = (13.0, 20.0)
 EMG_BAND       = (20.0, 45.0) #simple EMG proxy band
 
-#Dynamic threshold (lower is better: ratio < threshold = hit)
+#dynamic threshold (lower is better: ratio < threshold = hit)
 TARGET_SUCCESS = (0.65, 0.80)   #target hit rate range
 ADJUST_EVERY   = 15   #adjust every 15s
 UP_HARDER      = 0.9   # too easy > tighten threshold
