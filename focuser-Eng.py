@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Theta/Beta Ratio Neurofeedback — BrainFlow + 自动通道映射 + 自适应消眨眼/EOG回归 + 稳定化 + 迷你HUD + 注意力下降提示音
-- 兼容 OpenBCI Cyton / Cyton Daisy
-- 自动根据 pin_map 锁定 Fz/Cz（N6p/N7p）用于 TBR；同时用 Fp1/Fp2 作为 EOG 参考
-- Baseline -> 训练（动态阈值维持 65–80% 命中）-> CSV 日志
-- 声音：阶段提示、节拍、命中提示（带冷却）、阈值调整上/下行音阶、注意力下降提示
-- 预处理：去趋势 + 高通1Hz + 低通40Hz + 安全50Hz陷波 + 振幅裁剪
-- 眨眼处理：自适应眨眼检测（Z 分数 + 不应期）否决统计 + EOG 线性回归（Fp1/Fp2 -> Fz/Cz）
-- 稳定：EWMA 平滑 + 先回归后判噪（EMG/Beta）
-- HUD：训练期间显示 Ratio/Thr、状态条；从达标→不达标瞬间提示音
-"""
 
 import os
 import time
@@ -25,72 +14,80 @@ from brainflow.data_filter import (
     DataFilter, FilterTypes, DetrendOperations, WindowOperations
 )
 
-# ========== 基本设置 ==========
-BOARD_ID = BoardIds.CYTON_DAISY_BOARD.value   # 16通道：CYTON_DAISY_BOARD；8通道：CYTON_BOARD
+# =========================
+# Basic settings
+# =========================
+BOARD_ID = BoardIds.CYTON_DAISY_BOARD.value   # 16ch: CYTON_DAISY_BOARD; 8ch: CYTON_BOARD
 SERIAL_PORT = 'COM3' if sys.platform.startswith('win') else '/dev/ttyUSB0'
 
-# 训练参数
-BASELINE_SEC   = 60             # 基线时长
-TRAIN_SEC      = 20 * 60        # 训练时长（20 分钟）
-WINDOW_SEC     = 3              # 频谱窗口长度（秒）
-STEP_SEC       = 1              # 滑动步长（秒）
+# Training settings
+BASELINE_SEC   = 60#baseline duration(sec)
+TRAIN_SEC      = 20 * 60 #training duration
+WINDOW_SEC     = 3  #PSD window length
+STEP_SEC       = 1 #update step
 
-# 频段
+# Frequency bands
 THETA_BAND     = (4.0, 8.0)
 BETA_BAND      = (13.0, 20.0)
-EMG_BAND       = (20.0, 45.0)   # 简单肌电指标
+EMG_BAND       = (20.0, 45.0) #simple EMG proxy band
 
-# 动态阈值（越低越好：ratio < threshold == success）
-TARGET_SUCCESS = (0.65, 0.80)   # 目标命中率区间
-ADJUST_EVERY   = 15             # 每 15 s 调整一次阈值
-UP_HARDER      = 0.95           # 命中率高 -> 阈值更紧
-DOWN_EASIER    = 1.10           # 命中率低 -> 阈值放松
-THR_MIN_FACTOR = 0.30           # 阈值不低于基线的 30%
-THR_MAX_FACTOR = 3.00           # 阈值不高于基线的 3 倍
+#Dynamic threshold (lower is better: ratio < threshold = hit)
+TARGET_SUCCESS = (0.65, 0.80)   #target hit rate range
+ADJUST_EVERY   = 15   #adjust every 15s
+UP_HARDER      = 0.9   # too easy > tighten threshold
+DOWN_EASIER    = 1.10 #too hard> loosen threshold
+THR_MIN_FACTOR = 0.30#clamp >= baseline * 0.30
+THR_MAX_FACTOR = 3.00 #clamp <= baseline * 3.00
 
-# 平滑
-R_EWMA_ALPHA   = 0.30           # 0.2~0.4 稳定；越大越灵敏
+#smoothing
+R_EWMA_ALPHA   = 0.30           # 0.2–0.4 is stable; higher is more responsive
 
-# 伪迹裁剪（幅度裁剪仅用于预处理，避免爆表；不要拿它做眨眼判据）
+#artifact clip(preprocessing stability)
 CLIP_UV        = 60e-6
 
-# —— 自适应眨眼检测参数（替代固定阈值） ——
+#Adaptive blink detection (replaces fixed thresholds)
 BLINK_BAND       = (1.0, 4.0)
-BLINK_REF_LP     = 8.0          # Fp 低通至 8 Hz 保留眼动
-BLINK_Z_PP       = 4.0          # 峰-峰值 Z 分数阈
-BLINK_Z_BP       = 3.0          # 1–4 Hz 功率 Z 分数阈
-BLINK_REF_ALPHA  = 0.01         # 训练期参考均值慢速 EWMA
-BLINK_REFRACT    = 0.30         # 眨眼“不应期”秒数
+BLINK_REF_LP     = 8.0     #low-pass Fp to 8 Hz to keep eye activity
+BLINK_Z_PP       = 4.0 #peak-to-peak Z-score threshold
+BLINK_Z_BP       = 3.0 #1–4 Hz power Z-score threshold
+BLINK_REF_ALPHA  = 0.01    #slow EWMA update of baseline mean during training
+BLINK_REFRACT    = 0.30  #blink refractory period (sec)
 
-# —— 噪声否决（仅保留 EMG/Beta；先回归后判定） ——
-EMG_FACTOR     = 8.0            # EMG / Beta > 8 视为肌电影响
-AMP_REJECT_UV  = None           # 绝对幅度否决关闭；如需启用例如 150e-6
+#Noise veto (EMG/Beta only; check after regression)
+EMG_FACTOR     = 8.0        #if EMG/Beta > 8, mark as noisy (muscle)
+AMP_REJECT_UV  = None       #absolute amplitude veto disabled; set e.g. 150e-6 to enable
 
-# 反馈/日志
+#Feedback & logging
 BAR_LEN        = 40
 LOG_CSV        = f"tbr_brainflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-# ========= HUD 设置 =========
+# =========================
+# HUD settings
+# =========================
 SHOW_HUD             = True
 HUD_WIDTH            = 260
 HUD_HEIGHT           = 140
 HUD_UPDATE_HZ        = 15
-ATTN_DROP_COOLDOWN_S = 3.0   # 注意力下降提示音冷却
-DROP_GRACE_STEPS     = 1     # 从✔→✖ 允许的缓冲步数（避免偶发抖动）
+ATTN_DROP_COOLDOWN_S = 3.0   # attention-drop tone cooldown
+DROP_GRACE_STEPS     = 1     # grace steps for OK -> drop (avoid one-off jitter)
 
-# ========= 针脚映射（Cyton Daisy 推荐布线，可改）=========
+#pin map(TODO please EDIT HERE BASED ON YOUR PIN)
 pin_map = {
     'N1p': 'Fp1','N2p': 'Fp2','N3p': 'C3','N4p': 'C4',
     'N5p': 'P7','N6p': 'Fz','N7p': 'Cz','N8p': 'Pz',
     'N9p': 'F7','N10p': 'F8','N11p':'F3','N12p':'F4',
     'N13p':'T7','N14p':'T8','N15p':'P3','N16p':'P4'
 }
-# 用于 TBR 的脑区（默认 Fz + Cz 的平均；也可 ['Cz']）
+
+# Regions used for TBR (default: average of Fz + Cz; you can also use ['Cz'])
 tbr_regions = ['Fz', 'Cz']
-# 用于 EOG 参考/眨眼检测
+
+# Regions used for EOG reference / blink detection
 eog_regions = ['Fp1', 'Fp2']
 
-# ========= 声音设置（Windows零依赖）=========
+# =========================
+#Audio setting
+
 SOUND_ENABLED          = True
 SOUND_USE_WAV_IF_EXIST = True
 SOUND_DIR              = os.path.join(os.path.dirname(__file__), 'sounds')
@@ -108,7 +105,7 @@ WAV_FILES = {
     'success'       : 'success.wav',
     'adjust_up'     : 'adjust_up.wav',
     'adjust_down'   : 'adjust_down.wav',
-    'drop'          : 'drop.wav',          # 新增：注意力下降
+    'drop'          : 'drop.wav',          # new: attention-drop tone
 }
 
 SYNTH_TONES = {
@@ -118,13 +115,15 @@ SYNTH_TONES = {
     'train_end'     : (392, 450),
     'tick'          : (1000, 60),
     'success'       : (1175, TONE_MS_DEFAULT),
-    'drop'          : (420, 180),          # 新增：注意力下降
+    'drop'          : (420, 180),          # new: attention-drop tone
 }
 
-ADJUST_UP_SCALE   = [660, 784, 988]   # 难度↑
-ADJUST_DOWN_SCALE = [988, 784, 660]   # 难度↓
+ADJUST_UP_SCALE   = [660, 784, 988]   # harder
+ADJUST_DOWN_SCALE = [988, 784, 660]   # easier
 
-# ========= 声音工具（winsound零依赖）=========
+# =========================
+# Audio helper (winsound)
+# =========================
 class Sounder:
     def __init__(self):
         self._last_success_ts = 0.0
@@ -199,12 +198,14 @@ class Sounder:
         self._last_drop_ts = now
         self.play_event('drop')
 
-# ========= HUD（Tkinter 迷你小窗）=========
+
+#mini HUD (Tkinter window)
+
 class MiniHUD:
     """
-    极简 HUD：显示 Ratio / Thr / 状态条
-    - 绿色：达标；红色：不达标；黄：噪声或眨眼
-    - 非阻塞，独立线程运行
+    Minimal HUD: shows Ratio / Thr / status bar
+    - Green: OK; Red: below target; Yellow: gated (blink/noise)
+    - Non-blocking, runs in a background thread
     """
     def __init__(self, width=HUD_WIDTH, height=HUD_HEIGHT, update_hz=HUD_UPDATE_HZ):
         self.width = width
@@ -234,7 +235,7 @@ class MiniHUD:
         try:
             import tkinter as tk
         except Exception:
-            return  # 无 Tk 则静默退出
+            return  # no Tk available
 
         root = tk.Tk()
         root.title("EEG Focus HUD")
@@ -267,24 +268,26 @@ class MiniHUD:
                 except Exception:
                     pass
                 return
+
             with self._lock:
                 s = dict(self._state)
+
             ratio_var.set(f"Ratio: {s['ratio']:.2f}")
             thr_var.set(f"Thr:   {s['thr']:.2f}")
 
-            # 状态颜色：优先噪声/眨眼(黄)；否则 good=绿 / bad=红
+            # Color priority: gated (yellow) > ok (green) > drop (red)
             if s['blink'] or s['noisy']:
                 color = "#ffd600"
-                status_var.set("Status: gate (blink/noise)")
+                status_var.set("Status: gated (blink/noise)")
             else:
                 if s['good']:
-                    color = "#00c853"
+                    color = "#13b556"
                     status_var.set("Status: OK")
                 else:
                     color = "#ff5252"
                     status_var.set("Status: drop")
 
-            # 条形长度：按 ratio/thr 比例映射（>1.5 时封顶）
+            # Bar length maps to thr/ratio (clamped)
             try:
                 margin = max(0.0, min(1.5, s['thr'] / max(s['ratio'], 1e-9)))
             except Exception:
@@ -299,7 +302,9 @@ class MiniHUD:
         root.protocol("WM_DELETE_WINDOW", lambda: self._stop.set())
         root.mainloop()
 
-# ========= BrainFlow 工具 =========
+# =========================
+# BrainFlow helpers
+# =========================
 def setup_board(board_id=BOARD_ID, serial_port=SERIAL_PORT):
     params = BrainFlowInputParams()
     params.serial_port = serial_port
@@ -315,12 +320,12 @@ def map_regions_to_indices(regions):
                 found = pin
                 break
         if not found:
-            raise ValueError(f"在 pin_map 中找不到脑区 {r}")
+            raise ValueError(f"Region not found in pin_map: {r}")
         idx0 = int(found[1:-1]) - 1  # 'N6p' -> 6 -> idx 5
         n_list.append(idx0)
     return n_list
 
-# 可选引入 NoiseTypes（旧版 BrainFlow 可能没有）
+# Optional NoiseTypes import (older BrainFlow versions may not have it)
 try:
     from brainflow.data_filter import NoiseTypes
 except Exception:
@@ -389,12 +394,13 @@ def bandpower_welch(sig, sfreq, fmin, fmax):
     bp = float(np.trapz(psd[idx], freqs[idx]))
     return bp if np.isfinite(bp) else 0.0
 
-# ======== 自适应眨眼检测 + EOG回归 + 噪声否决 ========
+# =========================
+#Blink detection/  EOG regression/ noise veto
 def _robust_center_scale(x):
     x = np.asarray(x, dtype=np.float64)
     med = np.median(x)
     mad = np.median(np.abs(x - med)) + 1e-20
-    sigma = 1.4826 * mad
+    sigma = 1.4826 * mad  #approx. standard deviation
     return med, max(sigma, 1e-12)
 
 def compute_fp_features(sig, sfreq):
@@ -404,7 +410,7 @@ def compute_fp_features(sig, sfreq):
     pp = float(np.ptp(s))
     bp = bandpower_welch(s, sfreq, *BLINK_BAND)
     return pp, bp
-
+#------blink detection--------
 class BlinkGate:
     def __init__(self, z_pp=BLINK_Z_PP, z_bp=BLINK_Z_BP, alpha=BLINK_REF_ALPHA, refractory=BLINK_REFRACT):
         self.z_pp_th = z_pp
@@ -432,18 +438,19 @@ class BlinkGate:
         for i in range(fp_mat.shape[0]):
             pp, bp = compute_fp_features(fp_mat[i, :], sfreq)
             pp_vals.append(pp); bp_vals.append(bp)
-        pp = float(np.max(pp_vals))
+        pp = float(np.max(pp_vals))   #take the more blink-like side
         bp = float(np.max(bp_vals))
 
         z_pp = (pp - self.pp_mu) / self.pp_sigma
         z_bp = (bp - self.bp_mu) / self.bp_sigma
         blink = (z_pp >= self.z_pp_th) or (z_bp >= self.z_bp_th)
-
+#refractory period
         if blink and (now_ts - self.last_blink_ts) < self.refractory:
             blink = False
         if blink:
             self.last_blink_ts = now_ts
 
+        #slowly update reference mean
         self._update_ref(pp, bp)
         return blink
 
@@ -451,7 +458,7 @@ def eog_regress_out(use_mat, eeg_mat, fp_rel_idx):
     if not fp_rel_idx or max(fp_rel_idx) >= eeg_mat.shape[0]:
         return use_mat
     X = np.ascontiguousarray(eeg_mat[fp_rel_idx, :].astype(np.float64, copy=False))  # (2, n)
-    Xc = np.vstack([X, np.ones((1, X.shape[1]))])  # (3, n)
+    Xc = np.vstack([X, np.ones((1, X.shape[1]))])  # add constant term (3, n)
     Xt = Xc.T
     Y = use_mat.astype(np.float64, copy=True)
     try:
@@ -477,7 +484,7 @@ def is_noisy_after_regressed(use_mat_regressed, sfreq):
     emg = np.mean(emg); bet = np.mean(bet) + 1e-20
     return (emg / bet) > EMG_FACTOR
 
-# ======== TBR ========
+#TBR
 def compute_tbr(block_2d, sfreq):
     ratios = []
     for ch in range(block_2d.shape[0]):
@@ -496,41 +503,53 @@ def render_bar(ratio, threshold, blink=False, noisy=False):
     margin = max(0.0, min(2.0, threshold / max(ratio, 1e-9)))
     filled = int(min(BAR_LEN, round(BAR_LEN * min(margin, 1.5) / 1.5)))
     bar = '█' * filled + '·' * (BAR_LEN - filled)
+
+    # If blink/noise is detected, do not show ✔ (even if ratio < threshold).
     show_check = (good and not blink and not noisy)
-    flag = '✔' if show_check else ' '
+    flag = 'Good' if show_check else ' '
+
     mark = ''
-    if blink: mark += ' 👁'
-    if noisy: mark += ' ⚡'
+    if blink: mark += ' 👁 '
+    if noisy: mark += ' ⚡ '
     print(f"\rRatio={ratio:5.2f}  Thr={threshold:5.2f}  [{bar}] {flag}{mark}", end='', flush=True)
     return good
 
-# ========= 主程序 =========
+# =========================
+# Main
+# =========================
 def main():
-    print(">> 初始化 BrainFlow ...")
+    print("[INFO] Starting BrainFlow...")
     BoardShim.enable_dev_board_logger()
     board = setup_board()
     sfreq = BoardShim.get_sampling_rate(BOARD_ID)
-    eeg_channels = BoardShim.get_eeg_channels(BOARD_ID)  # 逻辑行号（与 N1p..N16p 顺序对齐）
-    print(f">> 采样率: {sfreq} Hz")
-    print(f">> EEG 逻辑通道编号（与 N1p..N16p 对齐）: {eeg_channels}")
+    eeg_channels = BoardShim.get_eeg_channels(BOARD_ID)  # channel row indices in BrainFlow buffer (aligned with N1p..N16p order)
+
+    print(f"[INFO] Sampling rate: {sfreq} Hz")
+    print(f"[INFO] EEG channel rows (aligned with N1p..N16p): {eeg_channels}")
 
     snd = Sounder()
 
-    # 计算相对行索引（相对 eeg_mat = buf[eeg_channels, :]）
+    #indices are relative to: eeg_mat = buf[eeg_channels, :]
     rel_idx = map_regions_to_indices(tbr_regions)    # e.g., Fz/Cz -> [5,6]
     fp_rel_idx = map_regions_to_indices(eog_regions) # Fp1/Fp2 -> [0,1]
     max_possible = len(eeg_channels)
-    rel_idx = [i for i in rel_idx if i < max_possible] or [0]
+    #keep only indices that are within range
+    rel_idx = [i for i in rel_idx if i < max_possible]
     fp_rel_idx = [i for i in fp_rel_idx if i < max_possible]
-    print(f">> 用于 TBR 的脑区: {tbr_regions} -> 相对行索引(0-based): {rel_idx}")
-    print(f">> 用于 EOG/眨眼: {eog_regions} -> 相对行索引(0-based): {fp_rel_idx}")
+    #ensure rel_idx is never empty
+    if not rel_idx:
+        rel_idx = [0]
 
-    # 启动 HUD
+
+    print(f"[INFO] TBR regions: {tbr_regions} -> relative indices (0-based): {rel_idx}")
+    print(f"[INFO] EOG/blink regions: {eog_regions} -> relative indices (0-based): {fp_rel_idx}")
+
+    #start HUD
     hud = MiniHUD()
     hud.start()
 
     board.prepare_session()
-    board.start_stream(45000)  # ring buffer
+    board.start_stream(45000) #ring buffer
     time.sleep(2.0)
 
     window_samples = int(WINDOW_SEC * sfreq)
@@ -542,7 +561,7 @@ def main():
 
     try:
         # ---------- Baseline ----------
-        print(">> Baseline 开始：自然睁眼放松，不要刻意控制脑电 ...")
+        print("[BASELINE] Start: relax with eyes open. Don't try to control your mind")
         snd.play_event('baseline_start')
 
         baseline_ratios = []
@@ -562,15 +581,19 @@ def main():
 
             eeg_mat = buf[eeg_channels, :]
 
+            # Collect baseline Fp features (pp/bp) for blink gating
             if fp_rel_idx and max(fp_rel_idx) < eeg_mat.shape[0]:
                 fp_mat = eeg_mat[fp_rel_idx, :]
                 pp_list, bp_list = [], []
                 for i in range(fp_mat.shape[0]):
                     pp, bp = compute_fp_features(fp_mat[i, :], sfreq)
                     pp_list.append(pp); bp_list.append(bp)
+
+                # Use the more blink-like side to build a conservative baseline
                 fp_baseline_pp.append(np.max(pp_list))
                 fp_baseline_bp.append(np.max(bp_list))
 
+            #Regress out EOG before compute TBR(baseline should be cleaned)
             use_mat_raw = eeg_mat[rel_idx, :]
             use_mat = eog_regress_out(use_mat_raw, eeg_mat, fp_rel_idx)
             r = compute_tbr(use_mat, sfreq)
@@ -580,7 +603,7 @@ def main():
             good = render_bar(r, thr_tmp)
             writer.writerow([now, 'baseline', f"{r:.6f}", f"{r:.6f}", f"{thr_tmp:.6f}", "", 0, 0])
 
-            # HUD 更新
+            # HUD update
             hud.update(ratio=r, thr=thr_tmp, good=good, blink=False, noisy=False)
 
             snd.metronome()
@@ -589,14 +612,16 @@ def main():
         threshold = baseline_ratio * 1.15
         threshold = max(baseline_ratio * THR_MIN_FACTOR, min(threshold, baseline_ratio * THR_MAX_FACTOR))
 
+        #Build blink gates
         blink_gate = BlinkGate()
         if fp_baseline_pp and fp_baseline_bp:
             blink_gate.fit_baseline(fp_baseline_pp, fp_baseline_bp)
-        print(f"\n>> Baseline 完成：median={baseline_ratio:.3f} → 初始阈值={threshold:.3f}")
+
+        print(f"\n[BASELINE] Done: median={baseline_ratio:.3f} -> initial threshold={threshold:.3f}")
         snd.play_event('baseline_end')
 
-        # ---------- Training ----------
-        print(">> 训练开始：放松但清醒，尽量让进度条更满（Ratio < Thr 即“得分”） ...")
+    #----------training-------------------
+        print("[TRAIN] Start: stay relaxed but alert. Aim for Ratio < Thr (that's a hit).")
         snd.play_event('train_start')
 
         train_start = time.time()
@@ -606,7 +631,7 @@ def main():
         prev_good = False
         r_ewma = None
 
-        # 注意力下降检测缓冲
+    #attention-drop detection buffer
         drop_buffer = 0
 
         while time.time() - train_start < TRAIN_SEC:
@@ -622,25 +647,27 @@ def main():
             eeg_mat = buf[eeg_channels, :]
             use_mat_raw = eeg_mat[rel_idx, :]
 
-            # EOG 回归（先净化）
+            #EOG regression clean the data
             use_mat = eog_regress_out(use_mat_raw, eeg_mat, fp_rel_idx)
 
-            # 自适应眨眼检测
+            #Adaptive blink detection (Z-score + refractory period)
             if fp_rel_idx and max(fp_rel_idx) < eeg_mat.shape[0]:
                 fp_mat = eeg_mat[fp_rel_idx, :]
                 blink = blink_gate.is_blink(fp_mat, sfreq, now)
             else:
                 blink = False
 
-            # 在回归后的信号上判噪
+            #noise detection on regressed signal (EMG/Beta only)
             noisy = is_noisy_after_regressed(use_mat, sfreq)
 
-            # 计算 TBR
+            #compute TBR (use regressed signal)
             r_raw = compute_tbr(use_mat, sfreq)
+
+            #EWMA smoothing for display/scoring
             r_ewma = r_raw if r_ewma is None else (R_EWMA_ALPHA * r_raw + (1 - R_EWMA_ALPHA) * r_ewma)
             good = render_bar(r_ewma, threshold, blink=blink, noisy=noisy)
 
-            # HUD 更新
+            #HUD
             hud.update(ratio=r_ewma, thr=threshold, good=(good and not blink and not noisy), blink=blink, noisy=noisy)
 
             counted = (not blink) and (not noisy)
@@ -648,13 +675,12 @@ def main():
                 tot += 1
                 if good:
                     succ += 1
-                    # 从不达标→达标，不需要提示，保持原 success 提示策略
                     if not prev_good:
                         snd.success()
                     prev_good = True
                     drop_buffer = 0
                 else:
-                    # 从达标→不达标，触发“下降提示音”（带缓冲/冷却）
+            #if drop from OK -> not OK, play an "attention drop" tone (with grace/cooldown)
                     if prev_good:
                         drop_buffer += 1
                         if drop_buffer > DROP_GRACE_STEPS:
@@ -662,35 +688,36 @@ def main():
                             prev_good = False
                             drop_buffer = 0
                     else:
-                        # 已经在不达标区
                         drop_buffer = 0
 
-            writer.writerow([now, 'train', f"{r_raw:.6f}", f"{r_ewma:.6f}", f"{threshold:.6f}", int(good and counted), int(blink), int(noisy)])
+            writer.writerow([now, 'train', f"{r_raw:.6f}", f"{r_ewma:.6f}", f"{threshold:.6f}",
+                             int(good and counted), int(blink), int(noisy)])
 
             snd.metronome()
 
-            # 动态阈值
+            #dynamic threshold control
             if now - last_adjust >= ADJUST_EVERY and tot > 0:
                 sr = succ / tot
                 if sr > TARGET_SUCCESS[1]:
                     threshold *= UP_HARDER
-                    print(f"\n>> 阈值调整：成功率={sr:.2f} → 新阈值={threshold:.3f}（↑更难）")
+                    print(f"\n[THRESHOLD] Adjust: hit rate={sr:.2f} -> new threshold={threshold:.3f} harder")
                     snd.adjust_up()
                 elif sr < TARGET_SUCCESS[0]:
                     threshold *= DOWN_EASIER
-                    print(f"\n>> 阈值调整：成功率={sr:.2f} → 新阈值={threshold:.3f}（↓放松）")
+                    print(f"\n[THRESHOLD] Adjust: hit rate={sr:.2f} -> new threshold={threshold:.3f} easier")
                     snd.adjust_down()
                 else:
-                    print(f"\n>> 阈值保持：成功率={sr:.2f}（在目标区间）")
+                    print(f"\n[THRESHOLD] Keep: hit rate={sr:.2f} (within target range)")
+
                 threshold = max(baseline_ratio * THR_MIN_FACTOR, min(threshold, baseline_ratio * THR_MAX_FACTOR))
                 succ, tot = 0, 0
                 last_adjust = now
 
-        print("\n>> 训练结束。日志文件:", LOG_CSV)
+        print("\n[INFO] Training finished. Log file:", LOG_CSV)
         snd.play_event('train_end')
 
     except KeyboardInterrupt:
-        print("\n>> 手动中断。")
+        print("\n[INFO] Stopped by user (Ctrl+C).")
     finally:
         try:
             board.stop_stream()
@@ -702,12 +729,11 @@ def main():
         except Exception:
             pass
         try:
-            # 关闭 HUD
             hud.stop()
             time.sleep(0.2)
         except Exception:
             pass
-        print(">> 已断开并保存。")
+        print("[INFO] Disconnected and saved.")
 
 if __name__ == "__main__":
     main()
