@@ -1,7 +1,7 @@
 
 
 # Theta/Beta Ratio (TBR) Neurofeedback — BrainFlow + OpenBCI
-Choose the version you want to use
+Choose the version you want to use, please do prepair openBCI board and headset before use, this is Daisy board
 Mainly focuser-Eng.py, you will need to modify the code, **REMEMBER TO EDIT PIN MAP BASED ON YOUR PIN MAP****
 
 A real-time EEG neurofeedback script that computes **Theta/Beta Ratio (TBR)** on selected channel (default: **Fz/Cz**) and provides feedback via a **terminal progress bar + audio cues**. Includes basic handling for **blinks/eye movements** using **Fp1/Fp2** as an EOG reference.
@@ -18,7 +18,7 @@ A real-time EEG neurofeedback script that computes **Theta/Beta Ratio (TBR)** on
    - It also learns your blink baseline from Fp1/Fp2.
 
 2. **Training**
-   - Every update step:
+   - for every update step:
      - reads a rolling EEG window (e.g., 3 seconds)
      - regresses out EOG (Fp1/Fp2) from target channels
      - filters the EEG (1–40 Hz + notch)

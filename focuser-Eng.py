@@ -9,6 +9,10 @@ import threading
 import numpy as np
 from datetime import datetime
 
+
+
+from brainflow.data_filter import NoiseTypes
+
 from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
 from brainflow.data_filter import (
     DataFilter, FilterTypes, DetrendOperations, WindowOperations
@@ -103,7 +107,7 @@ WAV_FILES = {
     'success'       : 'success.wav',
     'adjust_up'     : 'adjust_up.wav',
     'adjust_down'   : 'adjust_down.wav',
-    'drop'          : 'drop.wav',          # new: attention-drop tone
+    'drop'          : 'drop.wav',
 }
 
 SYNTH_TONES = {
@@ -119,9 +123,8 @@ SYNTH_TONES = {
 ADJUST_UP_SCALE   = [660, 784, 988]   # harder
 ADJUST_DOWN_SCALE = [988, 784, 660]   # easier
 
-# =========================
-# Audio helper (winsound)
-# =========================
+#=========================
+#Audio
 class Sounder:
     def __init__(self):
         self._last_success_ts = 0.0
@@ -300,9 +303,9 @@ class MiniHUD:
         root.protocol("WM_DELETE_WINDOW", lambda: self._stop.set())
         root.mainloop()
 
-# =========================
-# BrainFlow helpers
-# =========================
+
+#brainFlow helper function
+
 def setup_board(board_id=BOARD_ID, serial_port=SERIAL_PORT):
     params = BrainFlowInputParams()
     params.serial_port = serial_port
@@ -323,11 +326,8 @@ def map_regions_to_indices(regions):
         n_list.append(idx0)
     return n_list
 
-# Optional NoiseTypes import (older BrainFlow versions may not have it)
-try:
-    from brainflow.data_filter import NoiseTypes
-except Exception:
-    NoiseTypes = None
+
+
 
 def safe_notch(sig, sfreq, mains=50.0, bw=4.0):
     nyq = sfreq / 2.0
@@ -504,7 +504,7 @@ def render_bar(ratio, threshold, blink=False, noisy=False):
 
     # If blink/noise is detected, do not show ✔ (even if ratio < threshold).
     show_check = (good and not blink and not noisy)
-    flag = 'Good' if show_check else ' '
+    flag = 'v' if show_check else ' '
 
     mark = ''
     if blink: mark += ' 👁 '
@@ -512,9 +512,7 @@ def render_bar(ratio, threshold, blink=False, noisy=False):
     print(f"\rRatio={ratio:5.2f}  Thr={threshold:5.2f}  [{bar}] {flag}{mark}", end='', flush=True)
     return good
 
-# =========================
-# Main
-# =========================
+
 def main():
     print("[INFO] Starting BrainFlow...")
     BoardShim.enable_dev_board_logger()
